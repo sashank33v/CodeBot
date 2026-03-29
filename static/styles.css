@@ -1,0 +1,239 @@
+:root {
+    --bg: #f3efe6;
+    --panel: rgba(255, 252, 247, 0.88);
+    --panel-strong: #fffaf2;
+    --border: rgba(39, 38, 35, 0.12);
+    --text: #1d1b19;
+    --muted: #6d665f;
+    --accent: #c96f3b;
+    --accent-strong: #8e3f16;
+    --danger: #c63d2f;
+    --danger-soft: rgba(198, 61, 47, 0.08);
+    --success-soft: rgba(31, 105, 63, 0.08);
+    --shadow: 0 24px 80px rgba(68, 45, 22, 0.12);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: "Space Grotesk", sans-serif;
+    color: var(--text);
+    background:
+        radial-gradient(circle at top left, rgba(201, 111, 59, 0.2), transparent 28%),
+        radial-gradient(circle at top right, rgba(94, 135, 126, 0.16), transparent 22%),
+        linear-gradient(180deg, #f8f3ea 0%, var(--bg) 100%);
+}
+
+.shell {
+    width: min(1100px, calc(100% - 32px));
+    margin: 0 auto;
+    padding: 48px 0 72px;
+}
+
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    border-radius: 28px;
+    padding: 28px;
+    backdrop-filter: blur(12px);
+}
+
+.hero {
+    text-align: center;
+    margin-bottom: 24px;
+}
+
+.eyebrow {
+    margin: 0 0 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--accent-strong);
+    font-size: 0.8rem;
+    font-weight: 700;
+}
+
+h1 {
+    margin: 0;
+    font-size: clamp(2.1rem, 4vw, 4rem);
+    line-height: 1;
+}
+
+.lede {
+    margin: 16px auto 0;
+    max-width: 720px;
+    color: var(--muted);
+    font-size: 1.05rem;
+}
+
+.review-form {
+    display: grid;
+    gap: 18px;
+}
+
+.field-row {
+    display: grid;
+    gap: 10px;
+}
+
+label,
+h2,
+h3,
+h4 {
+    font-weight: 700;
+}
+
+select,
+textarea,
+button {
+    font: inherit;
+}
+
+select,
+textarea {
+    width: 100%;
+    border-radius: 18px;
+    border: 1px solid rgba(29, 27, 25, 0.12);
+    background: var(--panel-strong);
+    padding: 14px 16px;
+    color: var(--text);
+}
+
+select:focus,
+textarea:focus {
+    outline: 2px solid rgba(201, 111, 59, 0.35);
+    border-color: rgba(201, 111, 59, 0.6);
+}
+
+textarea {
+    min-height: 280px;
+    resize: vertical;
+}
+
+.actions {
+    display: flex;
+    justify-content: center;
+}
+
+button {
+    border: 0;
+    border-radius: 999px;
+    padding: 14px 28px;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+    color: white;
+    font-weight: 700;
+    cursor: pointer;
+    transition: transform 150ms ease, box-shadow 150ms ease, opacity 150ms ease;
+    box-shadow: 0 18px 34px rgba(142, 63, 22, 0.22);
+}
+
+button:hover {
+    transform: translateY(-1px);
+}
+
+button:disabled {
+    opacity: 0.7;
+    cursor: wait;
+}
+
+.form-message {
+    min-height: 24px;
+    margin: 0;
+    text-align: center;
+    color: var(--muted);
+}
+
+.error-text {
+    color: var(--danger);
+    font-weight: 700;
+}
+
+.results {
+    margin-top: 24px;
+}
+
+.hidden {
+    display: none;
+}
+
+.summary-panel {
+    margin-bottom: 20px;
+}
+
+.result-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px;
+}
+
+.error-panel {
+    border-color: rgba(198, 61, 47, 0.22);
+}
+
+.improvement-panel {
+    border-color: rgba(98, 126, 75, 0.22);
+}
+
+.fixes-panel {
+    border-color: rgba(31, 105, 63, 0.22);
+}
+
+.issue-card {
+    border-radius: 20px;
+    padding: 16px;
+    margin-top: 14px;
+}
+
+.alert-card {
+    background: var(--danger-soft);
+    border: 1px solid rgba(198, 61, 47, 0.16);
+}
+
+.fix-card {
+    background: var(--success-soft);
+    border: 1px solid rgba(31, 105, 63, 0.16);
+}
+
+.issue-card h4 {
+    margin: 0 0 8px;
+}
+
+.issue-card p {
+    margin: 0;
+    color: var(--muted);
+}
+
+.meta {
+    margin-top: 10px !important;
+    font-size: 0.9rem;
+    color: var(--danger) !important;
+    font-weight: 700;
+}
+
+pre {
+    margin: 12px 0 0;
+    padding: 12px;
+    border-radius: 14px;
+    overflow-x: auto;
+    background: rgba(29, 27, 25, 0.9);
+    color: #fff8eb;
+    font-size: 0.9rem;
+}
+
+.empty-state {
+    margin-top: 14px;
+    border-radius: 18px;
+    padding: 16px;
+    background: rgba(29, 27, 25, 0.04);
+    color: var(--muted);
+}
+
+@media (max-width: 900px) {
+    .result-grid {
+        grid-template-columns: 1fr;
+    }
+}

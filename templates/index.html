@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CodeBot Review</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <main class="shell">
+        <section class="panel hero">
+            <p class="eyebrow">AI Code Review</p>
+            <h1>Paste code. Surface bugs, risks, and better fixes.</h1>
+            <p class="lede">
+                Review Python, JavaScript, and C++ using a FastAPI backend connected to Ollama's tinyllama model.
+            </p>
+        </section>
+
+        <section class="panel">
+            <form id="review-form" class="review-form">
+                <div class="field-row">
+                    <label for="language">Language</label>
+                    <select id="language" name="language">
+                        <option value="Python">Python</option>
+                        <option value="JavaScript">JavaScript</option>
+                        <option value="C++">C++</option>
+                    </select>
+                </div>
+
+                <div class="field-row">
+                    <label for="code">Code</label>
+                    <textarea id="code" name="code" placeholder="Paste your code here..."></textarea>
+                </div>
+
+                <div class="actions">
+                    <button id="submit-button" type="submit">Review Code</button>
+                </div>
+                <p id="form-message" class="form-message" aria-live="polite"></p>
+            </form>
+        </section>
+
+        <section id="results" class="results hidden" aria-live="polite">
+            <div class="panel summary-panel">
+                <h2>Review Summary</h2>
+                <p id="summary-text"></p>
+            </div>
+
+            <div class="result-grid">
+                <article class="panel error-panel">
+                    <h3>Errors</h3>
+                    <div id="errors-content"></div>
+                </article>
+                <article class="panel improvement-panel">
+                    <h3>Improvements</h3>
+                    <div id="improvements-content"></div>
+                </article>
+                <article class="panel fixes-panel">
+                    <h3>Fixes</h3>
+                    <div id="fixes-content"></div>
+                </article>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const form = document.getElementById("review-form");
+        const submitButton = document.getElementById("submit-button");
+        const formMessage = document.getElementById("form-message");
+        const results = document.getElementById("results");
+        const summaryText = document.getElementById("summary-text");
+        const errorsContent = document.getElementById("errors-content");
+        const improvementsContent = document.getElementById("improvements-content");
+        const fixesContent = document.getElementById("fixes-content");
+
+        function escapeHtml(text) {
+            return text
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#039;");
+        }
+
+        function renderIssues(title, items, isFixes = false) {
+            if (!items.length) {
+                return `<div class="empty-state">No ${title.toLowerCase()} found.</div>`;
+            }
+
+            return items.map((item) => {
+                const extra = isFixes
+                    ? item.example
+                        ? `<pre>${escapeHtml(item.example)}</pre>`
+                        : ""
+                    : `<p class="meta">Line: ${escapeHtml(item.line || "N/A")}</p>`;
+
+                return `
+                    <div class="issue-card ${isFixes ? "fix-card" : "alert-card"}">
+                        <h4>${escapeHtml(item.title)}</h4>
+                        <p>${escapeHtml(item.details)}</p>
+                        ${extra}
+                    </div>
+                `;
+            }).join("");
+        }
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+
+            const language = document.getElementById("language").value;
+            const code = document.getElementById("code").value;
+
+            if (!code.trim()) {
+                formMessage.textContent = "Please paste some code before running a review.";
+                formMessage.className = "form-message error-text";
+                results.classList.add("hidden");
+                return;
+            }
+
+            formMessage.textContent = "Review in progress...";
+            formMessage.className = "form-message";
+            submitButton.disabled = true;
+
+            try {
+                const response = await fetch("/review", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ language, code })
+                });
+
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.detail || "Review failed.");
+                }
+
+                summaryText.textContent = data.summary;
+                const combinedErrors = [
+                    ...(data.syntax_errors || []),
+                    ...(data.type_errors || []),
+                    ...(data.security_issues || [])
+                ];
+
+                errorsContent.innerHTML = renderIssues("Errors", combinedErrors);
+                improvementsContent.innerHTML = renderIssues("Improvements", data.logical_issues || []);
+                fixesContent.innerHTML = renderIssues("Fixes", data.suggested_fixes || [], true);
+                results.classList.remove("hidden");
+                formMessage.textContent = "Review completed.";
+            } catch (error) {
+                formMessage.textContent = error.message;
+                formMessage.className = "form-message error-text";
+                results.classList.add("hidden");
+            } finally {
+                submitButton.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
