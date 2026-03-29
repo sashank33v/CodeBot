@@ -7,6 +7,7 @@ import builtins
 import shutil
 import subprocess
 import tempfile
+import textwrap
 from typing import Any
 from urllib.parse import urlparse
 
@@ -87,6 +88,26 @@ def normalize_review(payload: dict[str, Any]) -> ReviewResponse:
     )
 
 
+def merge_model_review(base: ReviewResponse, model_review: ReviewResponse) -> ReviewResponse:
+    merged = ReviewResponse(
+        summary=base.summary,
+        syntax_errors=list(base.syntax_errors),
+        type_errors=list(base.type_errors),
+        logical_issues=_merge_issue_lists(base.logical_issues, model_review.logical_issues),
+        security_issues=_merge_issue_lists(base.security_issues, model_review.security_issues),
+        suggested_fixes=_merge_fix_lists(base.suggested_fixes, model_review.suggested_fixes),
+        execution_trace=base.execution_trace,
+    )
+
+    if model_review.summary and model_review.summary not in {"Review completed.", "No issues detected."}:
+        if merged.summary == "No issues detected.":
+            merged.summary = model_review.summary
+        elif model_review.summary != merged.summary:
+            merged.summary = f"{merged.summary} {model_review.summary}".strip()
+
+    return merged
+
+
 def _normalize_items(items: Any) -> list[dict[str, str]]:
     normalized = []
     for item in items or []:
@@ -111,6 +132,68 @@ def _normalize_fixes(items: Any) -> list[dict[str, str]]:
             }
         )
     return normalized
+
+
+def _merge_issue_lists(
+    base_items: list[dict[str, str]],
+    extra_items: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    merged = [dict(item) for item in base_items]
+    seen = {
+        (
+            str(item.get("line") or "N/A"),
+            _normalize_issue_text(str(item.get("details") or "")),
+        )
+        for item in merged
+    }
+    for item in extra_items:
+        key = (
+            str(item.get("line") or "N/A"),
+            _normalize_issue_text(str(item.get("details") or "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(
+            {
+                "title": str(item.get("title") or "Issue"),
+                "details": str(item.get("details") or "No details provided."),
+                "line": str(item.get("line") or "N/A"),
+            }
+        )
+    return merged
+
+
+def _merge_fix_lists(
+    base_items: list[dict[str, str]],
+    extra_items: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    merged = [dict(item) for item in base_items]
+    seen = {
+        (
+            str(item.get("title") or ""),
+            str(item.get("details") or ""),
+            str(item.get("example") or ""),
+        )
+        for item in merged
+    }
+    for item in extra_items:
+        candidate = (
+            str(item.get("title") or ""),
+            str(item.get("details") or ""),
+            str(item.get("example") or ""),
+        )
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        merged.append(
+            {
+                "title": candidate[0] or "Suggested fix",
+                "details": candidate[1] or "No details provided.",
+                "example": candidate[2],
+            }
+        )
+    return merged
 
 
 def extract_json_block(text: str) -> dict[str, Any]:
@@ -140,7 +223,16 @@ def is_ollama_available() -> bool:
         return False
 
 
+def normalize_submitted_code(language: str, code: str) -> str:
+    normalized = code.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalized.strip("\ufeff")
+    if language == "Python":
+        normalized = textwrap.dedent(normalized)
+    return normalized.strip("\n")
+
+
 def run_local_review(language: str, code: str, reason: str | None = None) -> ReviewResponse:
+    code = normalize_submitted_code(language, code)
     syntax_errors: list[dict[str, str]] = []
     type_errors: list[dict[str, str]] = []
     logical_issues: list[dict[str, str]] = []
@@ -1216,8 +1308,10 @@ def collect_module_bindings(tree: ast.AST) -> set[str]:
 
 
 async def query_ollama(language: str, code: str) -> ReviewResponse:
+    code = normalize_submitted_code(language, code)
+    local_review = run_local_review(language, code)
     if not is_ollama_available():
-        return run_local_review(language, code)
+        return local_review
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -1231,18 +1325,18 @@ async def query_ollama(language: str, code: str) -> ReviewResponse:
         async with httpx.AsyncClient(timeout=8.0) as client:
             response = await client.post(OLLAMA_URL, json=payload)
             response.raise_for_status()
-    except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        return run_local_review(language, code)
-    except httpx.HTTPError as exc:
-        return run_local_review(language, code)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        return local_review
+    except httpx.HTTPError:
+        return local_review
 
     data = response.json()
     model_text = data.get("response", "")
     try:
         parsed = extract_json_block(model_text)
-        return normalize_review(parsed)
+        return merge_model_review(local_review, normalize_review(parsed))
     except HTTPException:
-        return run_local_review(language, code)
+        return local_review
 
 
 @app.get("/", response_class=HTMLResponse)
