@@ -3,53 +3,31 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Code Review Console</title>
+    <title>Review</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-    <div class="backdrop"></div>
-    <main class="app-shell">
-        <section class="hero-panel">
-            <div class="hero-copy">
-                <p class="eyebrow">Code Review Console</p>
-                <h1>Sharper analysis. Better signal.</h1>
-                <p class="hero-text">
-                    Review Python, JavaScript, and C++ with a live engine switch, stronger fallback analysis, and a result board designed to surface the issues that matter first.
-                </p>
-            </div>
-
-            <div class="hero-stats">
-                <div class="stat-tile">
-                    <span class="stat-label">Coverage</span>
-                    <strong>Syntax, type, logic, security</strong>
-                </div>
-                <div class="stat-tile">
-                    <span class="stat-label">Fallback Engine</span>
-                    <strong>Static analyzer with rule-based checks</strong>
-                </div>
-                <div class="stat-tile accent-tile">
-                    <span class="stat-label">Output</span>
-                    <strong>Ranked findings and actionable fixes</strong>
+    <div class="noise"></div>
+    <main class="shell">
+        <section class="topbar">
+            <div class="brand">
+                <span class="brand-mark"></span>
+                <div>
+                    <p class="micro">Code Review</p>
+                    <h1>Review</h1>
                 </div>
             </div>
+            <div id="status-pill" class="status-pill neutral">Ready</div>
         </section>
 
-        <section class="workspace-grid">
-            <section class="console-panel input-panel">
-                <div class="panel-heading">
-                    <div>
-                        <p class="section-kicker">Input</p>
-                        <h2>Review Session</h2>
-                    </div>
-                    <div id="status-pill" class="status-pill neutral">Ready</div>
-                </div>
-
+        <section class="layout">
+            <section class="panel input-panel">
                 <form id="review-form" class="review-form">
                     <div class="toolbar">
-                        <label class="field-row">
+                        <label class="field">
                             <span>Language</span>
                             <select id="language" name="language">
                                 <option value="Python">Python</option>
@@ -58,91 +36,82 @@
                             </select>
                         </label>
 
-                        <div class="mini-stat">
-                            <span class="mini-label">Lines</span>
+                        <div class="metric">
+                            <span>Lines</span>
                             <strong id="line-count">0</strong>
                         </div>
 
-                        <div class="mini-stat">
-                            <span class="mini-label">Characters</span>
+                        <div class="metric">
+                            <span>Chars</span>
                             <strong id="char-count">0</strong>
                         </div>
                     </div>
 
-                    <label class="field-row">
-                        <span>Snippet</span>
-                        <textarea id="code" name="code" spellcheck="false" placeholder="Paste code to review..."></textarea>
+                    <label class="field">
+                        <span>Code</span>
+                        <textarea id="code" name="code" spellcheck="false" placeholder="Paste code"></textarea>
                     </label>
 
-                    <div class="action-row">
-                        <button id="submit-button" type="submit">Run Review</button>
+                    <div class="actions">
+                        <button id="submit-button" type="submit">Review</button>
                         <p id="form-message" class="form-message" aria-live="polite"></p>
                     </div>
                 </form>
             </section>
 
-            <section id="results" class="results-panel hidden" aria-live="polite">
-                <section class="console-panel summary-panel">
-                    <div class="panel-heading">
-                        <div>
-                            <p class="section-kicker">Overview</p>
-                            <h2>Review Summary</h2>
-                        </div>
-                        <div id="summary-badge" class="summary-badge">Waiting</div>
+            <section id="results" class="results hidden" aria-live="polite">
+                <section class="panel summary-panel">
+                    <div class="summary-head">
+                        <p id="summary-text" class="summary-text"></p>
+                        <div id="summary-badge" class="summary-badge">0</div>
                     </div>
+                    <div class="scanline" aria-hidden="true"></div>
 
-                    <p id="summary-text" class="summary-text"></p>
-
-                    <div class="score-grid">
-                        <article class="score-card critical">
-                            <span class="score-label">Critical</span>
+                    <div class="score-row">
+                        <article class="score danger">
+                            <span>Critical</span>
                             <strong id="critical-count">0</strong>
-                            <p>Syntax, type, and security findings.</p>
                         </article>
 
-                        <article class="score-card warning">
-                            <span class="score-label">Logic</span>
+                        <article class="score warn">
+                            <span>Logic</span>
                             <strong id="logic-count">0</strong>
-                            <p>Correctness and maintainability signals.</p>
                         </article>
 
-                        <article class="score-card neutral-card">
-                            <span class="score-label">Fixes</span>
+                        <article class="score ok">
+                            <span>Fixes</span>
                             <strong id="fix-count">0</strong>
-                            <p>Suggested rewrites and next actions.</p>
                         </article>
                     </div>
                 </section>
 
-                <section class="results-columns">
-                    <article class="console-panel result-column">
-                        <div class="panel-heading compact">
-                            <div>
-                                <p class="section-kicker">Priority</p>
-                                <h3>Critical Findings</h3>
-                            </div>
+                <section id="trace-panel" class="panel trace-panel hidden">
+                    <div class="column-head">
+                        <p class="micro">Execution Trace</p>
+                    </div>
+                    <pre id="trace-content" class="trace-content"></pre>
+                </section>
+
+                <section class="result-grid">
+                    <article class="panel column">
+                        <div class="column-head">
+                            <p class="micro">Critical</p>
                         </div>
-                        <div id="errors-content" class="stack-list"></div>
+                        <div id="errors-content" class="card-stack"></div>
                     </article>
 
-                    <article class="console-panel result-column">
-                        <div class="panel-heading compact">
-                            <div>
-                                <p class="section-kicker">Behavior</p>
-                                <h3>Logic Review</h3>
-                            </div>
+                    <article class="panel column">
+                        <div class="column-head">
+                            <p class="micro">Logic</p>
                         </div>
-                        <div id="improvements-content" class="stack-list"></div>
+                        <div id="improvements-content" class="card-stack"></div>
                     </article>
 
-                    <article class="console-panel result-column">
-                        <div class="panel-heading compact">
-                            <div>
-                                <p class="section-kicker">Repair</p>
-                                <h3>Suggested Fixes</h3>
-                            </div>
+                    <article class="panel column">
+                        <div class="column-head">
+                            <p class="micro">Fixes</p>
                         </div>
-                        <div id="fixes-content" class="stack-list"></div>
+                        <div id="fixes-content" class="card-stack"></div>
                     </article>
                 </section>
             </section>
@@ -166,6 +135,8 @@
         const criticalCount = document.getElementById("critical-count");
         const logicCount = document.getElementById("logic-count");
         const fixCount = document.getElementById("fix-count");
+        const tracePanel = document.getElementById("trace-panel");
+        const traceContent = document.getElementById("trace-content");
 
         function escapeHtml(text) {
             return String(text)
@@ -178,21 +149,17 @@
 
         function renderIssues(items, variant, isFixes = false) {
             if (!items.length) {
-                return `<div class="empty-state">No findings in this section.</div>`;
+                return `<div class="empty-state reveal-item" style="--stagger: 0;">None</div>`;
             }
 
-            return items.map((item) => {
+            return items.map((item, index) => {
                 const meta = isFixes
-                    ? item.example
-                        ? `<pre>${escapeHtml(item.example)}</pre>`
-                        : ""
+                    ? item.example ? `<pre>${escapeHtml(item.example)}</pre>` : ""
                     : `<div class="issue-meta">Line ${escapeHtml(item.line || "N/A")}</div>`;
 
                 return `
-                    <article class="issue-card ${variant}">
-                        <div class="issue-topline">
-                            <h4>${escapeHtml(item.title)}</h4>
-                        </div>
+                    <article class="issue-card ${variant} reveal-item" style="--stagger: ${index};">
+                        <h3>${escapeHtml(item.title)}</h3>
                         <p>${escapeHtml(item.details)}</p>
                         ${meta}
                     </article>
@@ -203,6 +170,23 @@
         function setStatus(message, mode = "neutral") {
             statusPill.textContent = message;
             statusPill.className = `status-pill ${mode}`;
+        }
+
+        function setResultsState(totalIssues, criticalIssues) {
+            results.classList.remove("danger-view", "clean-view", "reveal");
+            summaryBadge.classList.remove("has-issues");
+            if (totalIssues > 0) {
+                results.classList.add("danger-view");
+                summaryBadge.classList.add("has-issues");
+            } else {
+                results.classList.add("clean-view");
+            }
+            if (criticalIssues > 0) {
+                results.classList.add("danger-view");
+            }
+            requestAnimationFrame(() => {
+                results.classList.add("reveal");
+            });
         }
 
         function updateInputStats() {
@@ -221,16 +205,17 @@
             const code = codeField.value;
 
             if (!code.trim()) {
-                formMessage.textContent = "Paste code before starting the review.";
+                formMessage.textContent = "Paste code.";
                 formMessage.className = "form-message error-text";
-                setStatus("Missing input", "error");
+                setStatus("Input", "error");
                 results.classList.add("hidden");
                 return;
             }
 
-            formMessage.textContent = "Analyzing snippet...";
+            formMessage.textContent = "";
             formMessage.className = "form-message";
             setStatus("Running", "working");
+            results.classList.remove("reveal");
             submitButton.disabled = true;
 
             try {
@@ -253,12 +238,10 @@
                 const logicIssues = data.logical_issues || [];
                 const fixes = data.suggested_fixes || [];
                 const totalIssues = combinedErrors.length + logicIssues.length;
+                const executionTrace = data.execution_trace || "";
 
-                summaryText.textContent = data.summary;
-                summaryBadge.textContent = totalIssues
-                    ? `${totalIssues} finding${totalIssues === 1 ? "" : "s"}`
-                    : "No findings";
-
+                summaryText.textContent = data.summary || "Review completed.";
+                summaryBadge.textContent = String(totalIssues);
                 criticalCount.textContent = String(combinedErrors.length);
                 logicCount.textContent = String(logicIssues.length);
                 fixCount.textContent = String(fixes.length);
@@ -266,18 +249,17 @@
                 errorsContent.innerHTML = renderIssues(combinedErrors, "critical-card");
                 improvementsContent.innerHTML = renderIssues(logicIssues, "warning-card");
                 fixesContent.innerHTML = renderIssues(fixes, "fix-card", true);
+                traceContent.textContent = executionTrace;
+                tracePanel.classList.toggle("hidden", !executionTrace);
                 results.classList.remove("hidden");
-                formMessage.textContent = "Review completed.";
-
-                if ((data.summary || "").toLowerCase().includes("fallback")) {
-                    setStatus("Fallback analyzer", "fallback");
-                } else {
-                    setStatus("Ollama response", "success");
-                }
+                setResultsState(totalIssues, combinedErrors.length);
+                setStatus("Done", "success");
             } catch (error) {
                 formMessage.textContent = error.message;
                 formMessage.className = "form-message error-text";
-                setStatus("Failed", "error");
+                setStatus("Error", "error");
+                traceContent.textContent = "";
+                tracePanel.classList.add("hidden");
                 results.classList.add("hidden");
             } finally {
                 submitButton.disabled = false;

@@ -4,6 +4,9 @@ import re
 import socket
 import ast
 import builtins
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 from urllib.parse import urlparse
 
@@ -22,6 +25,8 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "tinyllama")
 
 SYSTEM_PROMPT = """You are a strict code review assistant.
 Analyze the submitted code for the selected language.
+Prioritize concrete bugs over style commentary.
+Detect obvious syntax failures, undefined names, unreachable branches, broken conditions, unsafe execution, and suspicious API misuse.
 Return valid JSON only with this exact schema:
 {
   "summary": "short summary",
@@ -29,13 +34,16 @@ Return valid JSON only with this exact schema:
   "type_errors": [{"title": "string", "details": "string", "line": "string"}],
   "logical_issues": [{"title": "string", "details": "string", "line": "string"}],
   "security_issues": [{"title": "string", "details": "string", "line": "string"}],
-  "suggested_fixes": [{"title": "string", "details": "string", "example": "string"}]
+  "suggested_fixes": [{"title": "string", "details": "string", "example": "string"}],
+  "execution_trace": "string"
 }
 If no issues are found in a category, return an empty array for that category.
 Keep findings concrete and concise.
 """
 
 PYTHON_BUILTINS = set(dir(builtins))
+RUFF_BIN = shutil.which("ruff")
+MYPY_BIN = shutil.which("mypy")
 
 
 class ReviewRequest(BaseModel):
@@ -50,6 +58,7 @@ class ReviewResponse(BaseModel):
     logical_issues: list[dict[str, str]]
     security_issues: list[dict[str, str]]
     suggested_fixes: list[dict[str, str]]
+    execution_trace: str = ""
 
 
 app = FastAPI(title="Code Review")
@@ -74,6 +83,7 @@ def normalize_review(payload: dict[str, Any]) -> ReviewResponse:
         logical_issues=_normalize_items(payload.get("logical_issues")),
         security_issues=_normalize_items(payload.get("security_issues")),
         suggested_fixes=_normalize_fixes(payload.get("suggested_fixes")),
+        execution_trace=str(payload.get("execution_trace") or ""),
     )
 
 
@@ -136,13 +146,24 @@ def run_local_review(language: str, code: str, reason: str | None = None) -> Rev
     logical_issues: list[dict[str, str]] = []
     security_issues: list[dict[str, str]] = []
     suggested_fixes: list[dict[str, str]] = []
+    execution_trace = ""
+    seen_items: set[tuple[str, str, str, str]] = set()
+    seen_fixes: set[tuple[str, str, str]] = set()
 
     lines = code.splitlines()
 
     def add_item(target: list[dict[str, str]], title: str, details: str, line: str) -> None:
+        key = (str(id(target)), title, details, line)
+        if key in seen_items:
+            return
+        seen_items.add(key)
         target.append({"title": title, "details": details, "line": line})
 
     def add_fix(title: str, details: str, example: str = "") -> None:
+        key = (title, details, example)
+        if key in seen_fixes:
+            return
+        seen_fixes.add(key)
         suggested_fixes.append({"title": title, "details": details, "example": example})
 
     if language == "Python":
@@ -164,8 +185,26 @@ def run_local_review(language: str, code: str, reason: str | None = None) -> Rev
             logical_issues.extend(findings["logical_issues"])
             security_issues.extend(findings["security_issues"])
             suggested_fixes.extend(findings["suggested_fixes"])
+            tool_findings = run_python_static_tools(code)
+            for item in tool_findings["syntax_errors"]:
+                add_item(syntax_errors, item["title"], item["details"], item["line"])
+            for item in tool_findings["type_errors"]:
+                add_item(type_errors, item["title"], item["details"], item["line"])
+            for item in tool_findings["logical_issues"]:
+                add_item(logical_issues, item["title"], item["details"], item["line"])
+            for item in tool_findings["security_issues"]:
+                add_item(security_issues, item["title"], item["details"], item["line"])
+            runtime_items, runtime_trace = run_python_runtime_check(code)
+            execution_trace = runtime_trace or execution_trace
+            for item in runtime_items:
+                add_item(type_errors, item["title"], item["details"], item["line"])
 
     if language == "JavaScript":
+        syntax_errors.extend(run_external_syntax_check(language, code))
+        runtime_items, runtime_trace = run_javascript_runtime_check(code)
+        execution_trace = runtime_trace or execution_trace
+        for item in runtime_items:
+            add_item(type_errors, item["title"], item["details"], item["line"])
         for index, line in enumerate(lines, start=1):
             if re.search(r"\b(var)\b", line):
                 add_item(
@@ -188,6 +227,22 @@ def run_local_review(language: str, code: str, reason: str | None = None) -> Rev
                     str(index),
                 )
 
+            if re.search(r"\b(if|while)\s*\([^)]*=[^=].*\)", line):
+                add_item(
+                    logical_issues,
+                    "Assignment inside condition",
+                    "This condition appears to assign a value instead of comparing one.",
+                    str(index),
+                )
+
+            if "==" in line and "===" not in line:
+                add_item(
+                    logical_issues,
+                    "Loose equality",
+                    "== allows coercion and can hide simple bugs. Prefer === unless coercion is intentional.",
+                    str(index),
+                )
+
         open_braces = code.count("{")
         close_braces = code.count("}")
         if open_braces != close_braces:
@@ -199,12 +254,26 @@ def run_local_review(language: str, code: str, reason: str | None = None) -> Rev
             )
 
     if language == "C++":
+        cpp_findings, runtime_trace = run_cpp_checks(code)
+        execution_trace = runtime_trace or execution_trace
+        for item in cpp_findings["syntax_errors"]:
+            add_item(syntax_errors, item["title"], item["details"], item["line"])
+        for item in cpp_findings["type_errors"]:
+            add_item(type_errors, item["title"], item["details"], item["line"])
         for index, line in enumerate(lines, start=1):
             if "gets(" in line or "strcpy(" in line:
                 add_item(
                     security_issues,
                     "Unsafe standard library call",
                     "This function can overflow buffers and should be replaced with a safer alternative.",
+                    str(index),
+                )
+
+            if re.search(r"\bif\s*\([^)]*=[^=].*\)", line):
+                add_item(
+                    logical_issues,
+                    "Assignment inside condition",
+                    "This condition appears to assign a value instead of comparing one.",
                     str(index),
                 )
 
@@ -218,14 +287,18 @@ def run_local_review(language: str, code: str, reason: str | None = None) -> Rev
                         str(index),
                     )
 
+    if language == "Python":
+        syntax_errors = _dedupe_review_items(syntax_errors)
+        type_errors = _dedupe_review_items(type_errors)
+        logical_issues = _dedupe_review_items(logical_issues)
+        security_issues = _dedupe_review_items(security_issues)
+
     total_findings = sum(
         len(bucket) for bucket in [syntax_errors, type_errors, logical_issues, security_issues]
     )
-    summary = "Review completed with the local fallback analyzer."
+    summary = "Review completed."
     if total_findings == 0:
-        summary = "Review completed. The local analyzer did not detect a concrete issue in this snippet."
-    if reason:
-        summary = f"{summary} {reason}"
+        summary = "No issues detected."
 
     return ReviewResponse(
         summary=summary,
@@ -234,6 +307,7 @@ def run_local_review(language: str, code: str, reason: str | None = None) -> Rev
         logical_issues=logical_issues,
         security_issues=security_issues,
         suggested_fixes=suggested_fixes,
+        execution_trace=execution_trace,
     )
 
 
@@ -247,6 +321,7 @@ class PythonReviewVisitor(ast.NodeVisitor):
         self.scope_stack: list[set[str]] = [set(PYTHON_BUILTINS) | module_bindings]
         self.constant_stack: list[dict[str, Any]] = [{}]
         self.seen_findings: set[tuple[str, str, str]] = set()
+        self.function_depth = 0
 
     def add_issue(
         self,
@@ -294,6 +369,7 @@ class PythonReviewVisitor(ast.NodeVisitor):
     def visit_Assign(self, node: ast.Assign) -> None:
         resolved = self._resolve_constant(node.value)
         self._detect_constant_assignment_issues(node.value, node.lineno, resolved)
+        self._detect_self_reference_assignment(node.value, node.targets, node.lineno)
         for target in node.targets:
             self._register_target(target)
             self._track_constant_target(target, resolved)
@@ -303,6 +379,7 @@ class PythonReviewVisitor(ast.NodeVisitor):
         resolved = self._resolve_constant(node.value) if node.value is not None else None
         if node.value is not None:
             self._detect_constant_assignment_issues(node.value, node.lineno, resolved)
+            self._detect_self_reference_assignment(node.value, [node.target], node.lineno)
         self._register_target(node.target)
         self._track_constant_target(node.target, resolved)
         self.generic_visit(node)
@@ -358,6 +435,19 @@ class PythonReviewVisitor(ast.NodeVisitor):
     def visit_Subscript(self, node: ast.Subscript) -> None:
         sequence_value = self._resolve_constant(node.value)
         index_value = self._resolve_constant(node.slice)
+        if isinstance(sequence_value, dict) and index_value is not None:
+            if index_value not in sequence_value:
+                self.add_issue(
+                    self.logical_issues,
+                    "Missing dictionary key",
+                    f"This dictionary access uses the constant key `{index_value}`, but that key is not present.",
+                    node.lineno,
+                )
+                self.add_fix(
+                    "Guard dictionary access",
+                    "Check that the key exists first or use dict.get() with a default value.",
+                    "print(data.get(\"age\"))",
+                )
         if isinstance(sequence_value, (list, tuple, str)) and isinstance(index_value, int):
             if not (-len(sequence_value) <= index_value < len(sequence_value)):
                 self.add_issue(
@@ -382,6 +472,43 @@ class PythonReviewVisitor(ast.NodeVisitor):
                 "This expression always divides or mods by zero.",
                 node.lineno,
             )
+        self.generic_visit(node)
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        left = self._resolve_constant(node.left)
+        comparators = [self._resolve_constant(item) for item in node.comparators]
+        operands = [left, *comparators]
+        if len(operands) == 2 and all(value is not None for value in operands):
+            try:
+                result = self._evaluate_compare(operands[0], node.ops[0], operands[1])
+            except Exception:
+                result = None
+            if result is True:
+                self.add_issue(
+                    self.logical_issues,
+                    "Always-true comparison",
+                    "This comparison resolves to True with the constant values in the code.",
+                    node.lineno,
+                )
+            elif result is False:
+                self.add_issue(
+                    self.logical_issues,
+                    "Always-false comparison",
+                    "This comparison resolves to False with the constant values in the code.",
+                    node.lineno,
+                )
+        self.generic_visit(node)
+
+    def visit_If(self, node: ast.If) -> None:
+        test_value = self._resolve_constant(node.test)
+        if isinstance(test_value, bool):
+            title = "Dead branch" if test_value else "Unreachable branch"
+            details = (
+                "This condition is always True, so the else branch will never run."
+                if test_value
+                else "This condition is always False, so the body will never run."
+            )
+            self.add_issue(self.logical_issues, title, details, node.lineno)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -412,6 +539,18 @@ class PythonReviewVisitor(ast.NodeVisitor):
                         node.lineno,
                     )
 
+        if call_name in {"open", "len", "range", "print", "str", "int", "float"}:
+            expected = {
+                "open": (1, 8),
+                "len": (1, 1),
+                "range": (1, 3),
+                "print": (0, None),
+                "str": (0, 1),
+                "int": (0, 2),
+                "float": (0, 1),
+            }[call_name]
+            self._check_argument_count(call_name, node, *expected)
+
         self.generic_visit(node)
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -422,6 +561,7 @@ class PythonReviewVisitor(ast.NodeVisitor):
         function_scope.update(self._collect_argument_names(node.args))
         self.scope_stack.append(function_scope)
         self.constant_stack.append({})
+        self.function_depth += 1
 
         for default in [*node.args.defaults, *node.args.kw_defaults]:
             if isinstance(default, (ast.List, ast.Dict, ast.Set)):
@@ -438,6 +578,7 @@ class PythonReviewVisitor(ast.NodeVisitor):
                 )
 
         self.generic_visit(node)
+        self.function_depth -= 1
         self.constant_stack.pop()
         self.scope_stack.pop()
 
@@ -456,9 +597,6 @@ class PythonReviewVisitor(ast.NodeVisitor):
                 continue
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 bindings.add(child.name)
-                continue
-            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
-                bindings.add(child.id)
         return bindings
 
     def _collect_argument_names(self, args: ast.arguments) -> set[str]:
@@ -494,6 +632,32 @@ class PythonReviewVisitor(ast.NodeVisitor):
                 if node.id in constants:
                     return constants[node.id]
             return None
+        if isinstance(node, ast.UnaryOp):
+            operand = self._resolve_constant(node.operand)
+            if operand is None:
+                return None
+            if isinstance(node.op, ast.Not):
+                return not operand
+            if isinstance(node.op, ast.USub):
+                return -operand
+            if isinstance(node.op, ast.UAdd):
+                return +operand
+        if isinstance(node, ast.BoolOp):
+            values = [self._resolve_constant(value) for value in node.values]
+            if any(value is None for value in values):
+                return None
+            if isinstance(node.op, ast.And):
+                return all(values)
+            if isinstance(node.op, ast.Or):
+                return any(values)
+        if isinstance(node, ast.Compare) and len(node.ops) == 1 and len(node.comparators) == 1:
+            left = self._resolve_constant(node.left)
+            right = self._resolve_constant(node.comparators[0])
+            if left is not None and right is not None:
+                try:
+                    return self._evaluate_compare(left, node.ops[0], right)
+                except Exception:
+                    return None
         try:
             return ast.literal_eval(node)
         except Exception:
@@ -511,6 +675,517 @@ class PythonReviewVisitor(ast.NodeVisitor):
                         "A later constant key overwrites an earlier entry in this dictionary literal.",
                         line,
                     )
+
+    def _detect_self_reference_assignment(
+        self,
+        value: ast.AST,
+        targets: list[ast.AST],
+        line: int,
+    ) -> None:
+        assigned_names = {target.id for target in targets if isinstance(target, ast.Name)}
+        if not assigned_names:
+            return
+        for child in ast.walk(value):
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load) and child.id in assigned_names:
+                self.add_issue(
+                    self.type_errors,
+                    "Name used before assignment",
+                    f"`{child.id}` is read while being assigned on the same statement.",
+                    line,
+                )
+
+    def _evaluate_compare(self, left: Any, op: ast.cmpop, right: Any) -> bool | None:
+        operations = {
+            ast.Eq: lambda a, b: a == b,
+            ast.NotEq: lambda a, b: a != b,
+            ast.Lt: lambda a, b: a < b,
+            ast.LtE: lambda a, b: a <= b,
+            ast.Gt: lambda a, b: a > b,
+            ast.GtE: lambda a, b: a >= b,
+            ast.Is: lambda a, b: a is b,
+            ast.IsNot: lambda a, b: a is not b,
+            ast.In: lambda a, b: a in b,
+            ast.NotIn: lambda a, b: a not in b,
+        }
+        for op_type, fn in operations.items():
+            if isinstance(op, op_type):
+                return fn(left, right)
+        return None
+
+    def _check_argument_count(
+        self,
+        call_name: str,
+        node: ast.Call,
+        minimum: int,
+        maximum: int | None,
+    ) -> None:
+        if any(keyword.arg is None for keyword in node.keywords):
+            return
+        count = len(node.args) + len(node.keywords)
+        if count < minimum or (maximum is not None and count > maximum):
+            expected = f"{minimum}" if minimum == maximum else f"{minimum}-{maximum}" if maximum is not None else f"{minimum}+"
+            self.add_issue(
+                self.type_errors,
+                "Wrong argument count",
+                f"{call_name}() is called with {count} argument(s), but the common valid range is {expected}.",
+                node.lineno,
+            )
+
+
+def run_external_syntax_check(language: str, code: str) -> list[dict[str, str]]:
+    if language == "JavaScript":
+        checker = shutil.which("node")
+        if checker:
+            return _run_temp_check(
+                [checker, "--check"],
+                code,
+                ".js",
+                language,
+            )
+    if language == "C++":
+        checker = shutil.which("g++") or shutil.which("clang++")
+        if checker:
+            return _run_temp_check(
+                [checker, "-fsyntax-only"],
+                code,
+                ".cpp",
+                language,
+            )
+    return []
+
+
+def run_python_static_tools(code: str) -> dict[str, list[dict[str, str]]]:
+    findings = {"syntax_errors": [], "type_errors": [], "logical_issues": [], "security_issues": []}
+    if not (RUFF_BIN or MYPY_BIN):
+        return findings
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as handle:
+        handle.write(code)
+        temp_path = handle.name
+
+    try:
+        if RUFF_BIN:
+            findings = _merge_findings(findings, _run_ruff_check(temp_path))
+        if MYPY_BIN:
+            findings = _merge_findings(findings, _run_mypy_check(temp_path))
+    finally:
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+    return findings
+
+
+def run_python_runtime_check(code: str) -> tuple[list[dict[str, str]], str]:
+    checker = shutil.which("python3")
+    if not checker:
+        return [], ""
+    result = _run_temp_command([checker, "-I", "-X", "faulthandler"], code, ".py")
+    if result is None or result.returncode == 0:
+        return [], ""
+    output = (result.stderr or result.stdout).strip()
+    line_match = re.findall(r'File ".*?", line (\d+)', output)
+    details = _extract_error_line(output) or "Python raised a runtime error."
+    if result.returncode == 124:
+        details = "Python execution timed out during review."
+    error_name = _extract_exception_name(details) or "Python runtime error"
+    return (
+        [
+            {
+                "title": error_name,
+                "details": details,
+                "line": line_match[-1] if line_match else "N/A",
+            }
+        ],
+        output,
+    )
+
+
+def _run_ruff_check(path: str) -> dict[str, list[dict[str, str]]]:
+    findings = {"syntax_errors": [], "type_errors": [], "logical_issues": [], "security_issues": []}
+    try:
+        result = subprocess.run(
+            [
+                RUFF_BIN,
+                "check",
+                "--select",
+                "F,E9,B,PLE,PLW,S",
+                "--output-format",
+                "json",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=6,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return findings
+
+    output = (result.stdout or "").strip()
+    if not output:
+        return findings
+
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return findings
+
+    for item in payload:
+        code = str(item.get("code") or "Ruff")
+        message = str(item.get("message") or "Ruff detected an issue.")
+        location = item.get("location") or {}
+        line = str(location.get("row") or "N/A")
+        title = f"{code} ({_ruff_rule_label(code)})"
+        bucket = _ruff_bucket(code)
+        findings[bucket].append({"title": title, "details": message, "line": line})
+    return findings
+
+
+def _run_mypy_check(path: str) -> dict[str, list[dict[str, str]]]:
+    findings = {"syntax_errors": [], "type_errors": [], "logical_issues": [], "security_issues": []}
+    try:
+        result = subprocess.run(
+            [
+                MYPY_BIN,
+                "--check-untyped-defs",
+                "--warn-unreachable",
+                "--strict-equality",
+                "--extra-checks",
+                "--show-error-codes",
+                "--show-column-numbers",
+                "--hide-error-context",
+                "--no-color-output",
+                "--no-error-summary",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return findings
+
+    output = (result.stdout or result.stderr or "").strip()
+    if not output:
+        return findings
+
+    for line in output.splitlines():
+        match = re.match(r"^(.*?):(\d+):(?:(\d+):)?\s*(error|note):\s*(.*)$", line.strip())
+        if not match:
+            continue
+        _, line_number, _, severity, message = match.groups()
+        bucket = "syntax_errors" if "syntax" in message.lower() else "type_errors"
+        title = "Mypy error" if severity == "error" else "Mypy note"
+        findings[bucket].append(
+            {
+                "title": title,
+                "details": message,
+                "line": line_number,
+            }
+        )
+    return findings
+
+
+def _merge_findings(
+    left: dict[str, list[dict[str, str]]],
+    right: dict[str, list[dict[str, str]]],
+) -> dict[str, list[dict[str, str]]]:
+    for key in left:
+        left[key].extend(right.get(key, []))
+    return left
+
+
+def _ruff_bucket(code: str) -> str:
+    if code.startswith("E9"):
+        return "syntax_errors"
+    if code.startswith("S"):
+        return "security_issues"
+    if code.startswith("B"):
+        return "logical_issues"
+    return "type_errors"
+
+
+def _ruff_rule_label(code: str) -> str:
+    if code.startswith("E9"):
+        return "syntax"
+    if code.startswith("F"):
+        return "pyflakes"
+    if code.startswith("B"):
+        return "bugbear"
+    if code.startswith("S"):
+        return "bandit"
+    if code.startswith("PLE"):
+        return "pylint error"
+    if code.startswith("PLW"):
+        return "pylint warning"
+    return "ruff"
+
+
+def run_javascript_runtime_check(code: str) -> tuple[list[dict[str, str]], str]:
+    checker = shutil.which("node")
+    if not checker:
+        return [], ""
+    result = _run_temp_command([checker], code, ".js")
+    if result is None or result.returncode == 0:
+        return [], ""
+    output = (result.stderr or result.stdout).strip()
+    line_match = re.search(r":(\d+)\b", output)
+    details = _extract_error_line(output) or "JavaScript raised a runtime error."
+    if result.returncode == 124:
+        details = "JavaScript execution timed out during review."
+    error_name = _extract_exception_name(details) or "JavaScript runtime error"
+    return (
+        [
+            {
+                "title": error_name,
+                "details": details,
+                "line": line_match.group(1) if line_match else "N/A",
+            }
+        ],
+        output,
+    )
+
+
+def run_cpp_checks(code: str) -> tuple[dict[str, list[dict[str, str]]], str]:
+    compiler = shutil.which("g++") or shutil.which("clang++")
+    findings = {"syntax_errors": [], "type_errors": []}
+    if not compiler:
+        return findings, ""
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source_path = os.path.join(temp_dir, "review.cpp")
+        output_path = os.path.join(temp_dir, "review.out")
+        try:
+            with open(source_path, "w", encoding="utf-8") as handle:
+                handle.write(code)
+            compile_result = subprocess.run(
+                [compiler, "-std=c++17", "-Wall", "-Wextra", source_path, "-o", output_path],
+                capture_output=True,
+                text=True,
+                timeout=6,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return findings, ""
+
+        if compile_result.returncode != 0:
+            output = (compile_result.stderr or compile_result.stdout).strip()
+            line_match = re.search(r":(\d+)(?::\d+)?:", output)
+            findings["syntax_errors"].append(
+                {
+                    "title": "C++ compiler error",
+                    "details": _first_nonempty_line(output) or "C++ compilation failed.",
+                    "line": line_match.group(1) if line_match else "N/A",
+                }
+            )
+            return findings, output
+
+        try:
+            runtime_result = subprocess.run(
+                [output_path],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+                cwd=temp_dir,
+            )
+        except subprocess.TimeoutExpired:
+            findings["type_errors"].append(
+                {
+                    "title": "C++ runtime timeout",
+                    "details": "Compiled code did not finish within the review timeout.",
+                    "line": "N/A",
+                }
+            )
+            return findings, "Execution timed out."
+        except OSError:
+            return findings, ""
+
+        if runtime_result.returncode != 0:
+            output = (runtime_result.stderr or runtime_result.stdout).strip()
+            findings["type_errors"].append(
+                {
+                    "title": _extract_exception_name(_extract_error_line(output) or "") or "C++ runtime error",
+                    "details": _extract_error_line(output) or "Compiled code exited with an error.",
+                    "line": "N/A",
+                }
+            )
+            return findings, output
+    return findings, ""
+
+
+def _run_temp_command(command: list[str], code: str, suffix: str) -> subprocess.CompletedProcess[str] | None:
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False, encoding="utf-8") as handle:
+            handle.write(code)
+            temp_path = handle.name
+        try:
+            return subprocess.run(
+                [*command, temp_path],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess([*command, temp_path], 124, "", "")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _last_nonempty_line(text: str) -> str:
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _extract_error_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if "Error:" in stripped:
+            return stripped
+    return _last_nonempty_line(text)
+
+
+def _extract_exception_name(text: str) -> str:
+    match = re.match(r"([A-Za-z_][A-Za-z0-9_]*Error|[A-Za-z_][A-Za-z0-9_]*Exception|ZeroDivisionError|KeyError|NameError|TypeError|ValueError|RuntimeError|TimeoutError|SyntaxError)\b", text.strip())
+    return match.group(1) if match else ""
+
+
+def _dedupe_review_items(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: dict[tuple[str, str], dict[str, str]] = {}
+
+    for item in items:
+        normalized = _normalize_issue_text(item.get("details", ""))
+        line = str(item.get("line") or "N/A")
+        key = (line, normalized)
+        current = {
+            "title": str(item.get("title") or "Issue"),
+            "details": str(item.get("details") or "No details provided."),
+            "line": line,
+        }
+
+        if key not in seen:
+            seen[key] = current
+            deduped.append(current)
+            continue
+
+        if _issue_priority(current) > _issue_priority(seen[key]):
+            existing = seen[key]
+            existing["title"] = current["title"]
+            existing["details"] = current["details"]
+
+    return deduped
+
+
+def _normalize_issue_text(text: str) -> str:
+    normalized = text.lower().strip()
+    undefined_name = _extract_named_symbol(normalized)
+    if undefined_name:
+        return f"undefined-name:{undefined_name}"
+
+    runtime_missing_key_match = re.search(r"keyerror:\s*[\"'`]?([^\"'`\s]+)[\"'`]?", normalized)
+    if runtime_missing_key_match:
+        return f"missing-key:{runtime_missing_key_match.group(1)}"
+
+    static_missing_key_match = re.search(r"constant key\s+[\"'`]?([^\"'`\s]+)[\"'`]?\s*,?\s+but that key is not present", normalized)
+    if static_missing_key_match:
+        return f"missing-key:{static_missing_key_match.group(1)}"
+
+    normalized = re.sub(r"`([^`]+)`", r"\1", normalized)
+    normalized = re.sub(r'"([^"]+)"', r"\1", normalized)
+    normalized = re.sub(r"'([^']+)'", r"\1", normalized)
+    normalized = normalized.replace(" is not defined", "")
+    normalized = normalized.replace("undefined name ", "")
+    normalized = normalized.replace("name ", "")
+    normalized = normalized.replace("cannot read properties of ", "")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
+
+
+def _issue_priority(item: dict[str, str]) -> int:
+    title = str(item.get("title") or "")
+    if title in {"SyntaxError", "TypeError", "NameError", "KeyError", "ValueError", "RuntimeError"}:
+        return 4
+    if title.startswith("Mypy"):
+        return 3
+    if title.startswith("F") or title.startswith("E9") or title.startswith("B") or title.startswith("PLE") or title.startswith("PLW") or title.startswith("S"):
+        return 2
+    return 1
+
+
+def _extract_named_symbol(text: str) -> str:
+    patterns = [
+        r"undefined name\s+[\"'`]?([a-zA-Z_][a-zA-Z0-9_]*)[\"'`]?(?:\s|$)",
+        r"name\s+[\"'`]?([a-zA-Z_][a-zA-Z0-9_]*)[\"'`]?\s+is not defined",
+        r"[\"'`]?([a-zA-Z_][a-zA-Z0-9_]*)[\"'`]?\s+is referenced before any visible definition in this scope",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _run_temp_check(
+    command: list[str],
+    code: str,
+    suffix: str,
+    language: str,
+) -> list[dict[str, str]]:
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as handle:
+            handle.write(code)
+            temp_path = handle.name
+        result = subprocess.run(
+            [*command, temp_path],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    finally:
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+
+    if result.returncode == 0:
+        return []
+
+    message = (result.stderr or result.stdout).strip()
+    if not message:
+        message = f"{language} syntax check failed."
+    line_match = re.search(r":(\d+)(?::\d+)?:", message)
+    return [
+        {
+            "title": f"{language} syntax error",
+            "details": message.splitlines()[0],
+            "line": line_match.group(1) if line_match else "N/A",
+        }
+    ]
 
 
 def analyze_python_code(tree: ast.AST) -> dict[str, list[dict[str, str]]]:
@@ -537,20 +1212,12 @@ def collect_module_bindings(tree: ast.AST) -> set[str]:
             for alias in node.names:
                 if alias.name != "*":
                     bindings.add(alias.asname or alias.name)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
-            for child in ast.walk(node):
-                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
-                    bindings.add(child.id)
     return bindings
 
 
 async def query_ollama(language: str, code: str) -> ReviewResponse:
     if not is_ollama_available():
-        return run_local_review(
-            language,
-            code,
-            f"Ollama was unavailable at {OLLAMA_URL}.",
-        )
+        return run_local_review(language, code)
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -565,17 +1232,9 @@ async def query_ollama(language: str, code: str) -> ReviewResponse:
             response = await client.post(OLLAMA_URL, json=payload)
             response.raise_for_status()
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        return run_local_review(
-            language,
-            code,
-            f"Ollama was unavailable at {OLLAMA_URL}.",
-        )
+        return run_local_review(language, code)
     except httpx.HTTPError as exc:
-        return run_local_review(
-            language,
-            code,
-            "Ollama returned an error response.",
-        )
+        return run_local_review(language, code)
 
     data = response.json()
     model_text = data.get("response", "")
@@ -583,11 +1242,7 @@ async def query_ollama(language: str, code: str) -> ReviewResponse:
         parsed = extract_json_block(model_text)
         return normalize_review(parsed)
     except HTTPException:
-        return run_local_review(
-            language,
-            code,
-            "The model response could not be parsed cleanly, so a local fallback review was used.",
-        )
+        return run_local_review(language, code)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -603,4 +1258,5 @@ async def review_code(review_request: ReviewRequest) -> ReviewResponse:
 
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=3033, reload=False)
+    port = int(os.getenv("PORT", "3033"))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
