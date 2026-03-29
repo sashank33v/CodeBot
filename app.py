@@ -2,6 +2,8 @@ import json
 import os
 import re
 import socket
+import ast
+import builtins
 from typing import Any
 from urllib.parse import urlparse
 
@@ -32,6 +34,8 @@ Return valid JSON only with this exact schema:
 If no issues are found in a category, return an empty array for that category.
 Keep findings concrete and concise.
 """
+
+PYTHON_BUILTINS = set(dir(builtins))
 
 
 class ReviewRequest(BaseModel):
@@ -143,7 +147,7 @@ def run_local_review(language: str, code: str, reason: str | None = None) -> Rev
 
     if language == "Python":
         try:
-            compile(code, "<review>", "exec")
+            tree = ast.parse(code, filename="<review>", mode="exec")
         except SyntaxError as exc:
             add_item(
                 syntax_errors,
@@ -151,28 +155,15 @@ def run_local_review(language: str, code: str, reason: str | None = None) -> Rev
                 exc.msg or "Python could not parse this code.",
                 str(exc.lineno or "N/A"),
             )
+            tree = None
 
-        for index, line in enumerate(lines, start=1):
-            if re.search(r"def\s+\w+\s*\([^)]*=\[\]\)", line):
-                add_item(
-                    logical_issues,
-                    "Mutable default argument",
-                    "Using [] as a default value shares the same list across calls.",
-                    str(index),
-                )
-                add_fix(
-                    "Use None as the default",
-                    "Create the list inside the function so each call gets a fresh value.",
-                    "def add_item(item, my_list=None):\n    if my_list is None:\n        my_list = []\n    my_list.append(item)\n    return my_list",
-                )
-
-            if "eval(" in line:
-                add_item(
-                    security_issues,
-                    "Unsafe dynamic execution",
-                    "eval() can execute untrusted input and should be avoided.",
-                    str(index),
-                )
+        if tree is not None:
+            findings = analyze_python_code(tree)
+            syntax_errors.extend(findings["syntax_errors"])
+            type_errors.extend(findings["type_errors"])
+            logical_issues.extend(findings["logical_issues"])
+            security_issues.extend(findings["security_issues"])
+            suggested_fixes.extend(findings["suggested_fixes"])
 
     if language == "JavaScript":
         for index, line in enumerate(lines, start=1):
@@ -227,16 +218,12 @@ def run_local_review(language: str, code: str, reason: str | None = None) -> Rev
                         str(index),
                     )
 
-    if not any([syntax_errors, type_errors, logical_issues, security_issues]):
-        logical_issues.append(
-            {
-                "title": "No obvious static issues detected",
-                "details": "The fallback review did not find a strong issue signal. For deeper analysis, connect Ollama with a stronger coding model.",
-                "line": "N/A",
-            }
-        )
-
+    total_findings = sum(
+        len(bucket) for bucket in [syntax_errors, type_errors, logical_issues, security_issues]
+    )
     summary = "Review completed with the local fallback analyzer."
+    if total_findings == 0:
+        summary = "Review completed. The local analyzer did not detect a concrete issue in this snippet."
     if reason:
         summary = f"{summary} {reason}"
 
@@ -248,6 +235,313 @@ def run_local_review(language: str, code: str, reason: str | None = None) -> Rev
         security_issues=security_issues,
         suggested_fixes=suggested_fixes,
     )
+
+
+class PythonReviewVisitor(ast.NodeVisitor):
+    def __init__(self, module_bindings: set[str]) -> None:
+        self.syntax_errors: list[dict[str, str]] = []
+        self.type_errors: list[dict[str, str]] = []
+        self.logical_issues: list[dict[str, str]] = []
+        self.security_issues: list[dict[str, str]] = []
+        self.suggested_fixes: list[dict[str, str]] = []
+        self.scope_stack: list[set[str]] = [set(PYTHON_BUILTINS) | module_bindings]
+        self.constant_stack: list[dict[str, Any]] = [{}]
+        self.seen_findings: set[tuple[str, str, str]] = set()
+
+    def add_issue(
+        self,
+        target: list[dict[str, str]],
+        title: str,
+        details: str,
+        line: int | str | None,
+    ) -> None:
+        line_value = str(line or "N/A")
+        key = (title, details, line_value)
+        if key in self.seen_findings:
+            return
+        self.seen_findings.add(key)
+        target.append({"title": title, "details": details, "line": line_value})
+
+    def add_fix(self, title: str, details: str, example: str = "") -> None:
+        key = (title, details, example)
+        if key in self.seen_findings:
+            return
+        self.seen_findings.add(key)
+        self.suggested_fixes.append({"title": title, "details": details, "example": example})
+
+    def current_scope(self) -> set[str]:
+        return self.scope_stack[-1]
+
+    def current_constants(self) -> dict[str, Any]:
+        return self.constant_stack[-1]
+
+    def define_name(self, name: str) -> None:
+        self.current_scope().add(name)
+
+    def is_defined(self, name: str) -> bool:
+        return any(name in scope for scope in reversed(self.scope_stack))
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.define_name(alias.asname or alias.name.split(".")[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            self.define_name(alias.asname or alias.name)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        resolved = self._resolve_constant(node.value)
+        self._detect_constant_assignment_issues(node.value, node.lineno, resolved)
+        for target in node.targets:
+            self._register_target(target)
+            self._track_constant_target(target, resolved)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        resolved = self._resolve_constant(node.value) if node.value is not None else None
+        if node.value is not None:
+            self._detect_constant_assignment_issues(node.value, node.lineno, resolved)
+        self._register_target(node.target)
+        self._track_constant_target(node.target, resolved)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._register_target(node.target)
+        self._track_constant_target(node.target, None)
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._register_target(node.target)
+        self.generic_visit(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._register_target(node.target)
+        self.generic_visit(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        for item in node.items:
+            if item.optional_vars is not None:
+                self._register_target(item.optional_vars)
+        self.generic_visit(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        for item in node.items:
+            if item.optional_vars is not None:
+                self._register_target(item.optional_vars)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.define_name(node.name)
+        self.scope_stack.append(set(self.current_scope()))
+        self.constant_stack.append(dict(self.current_constants()))
+        self.generic_visit(node)
+        self.constant_stack.pop()
+        self.scope_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load) and not self.is_defined(node.id):
+            self.add_issue(
+                self.type_errors,
+                "Possible undefined name",
+                f"`{node.id}` is referenced before any visible definition in this scope.",
+                node.lineno,
+            )
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        sequence_value = self._resolve_constant(node.value)
+        index_value = self._resolve_constant(node.slice)
+        if isinstance(sequence_value, (list, tuple, str)) and isinstance(index_value, int):
+            if not (-len(sequence_value) <= index_value < len(sequence_value)):
+                self.add_issue(
+                    self.logical_issues,
+                    "Index out of range",
+                    "A constant sequence is accessed with an index that exceeds its bounds.",
+                    node.lineno,
+                )
+                self.add_fix(
+                    "Guard index access",
+                    "Check the sequence length before indexing or use a valid offset.",
+                    "if len(arr) > 5:\n    print(arr[5])",
+                )
+        self.generic_visit(node)
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        right = self._resolve_constant(node.right)
+        if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)) and right == 0:
+            self.add_issue(
+                self.logical_issues,
+                "Division by zero",
+                "This expression always divides or mods by zero.",
+                node.lineno,
+            )
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        call_name = self._call_name(node.func)
+        if call_name in {"eval", "exec"}:
+            self.add_issue(
+                self.security_issues,
+                "Unsafe dynamic execution",
+                f"{call_name}() can execute untrusted input and should be avoided.",
+                node.lineno,
+            )
+
+        if call_name == "pickle.loads":
+            self.add_issue(
+                self.security_issues,
+                "Unsafe deserialization",
+                "Unpickling untrusted data can execute arbitrary code.",
+                node.lineno,
+            )
+
+        if call_name == "subprocess.run":
+            for keyword in node.keywords:
+                if keyword.arg == "shell" and self._resolve_constant(keyword.value) is True:
+                    self.add_issue(
+                        self.security_issues,
+                        "Shell execution enabled",
+                        "subprocess.run(..., shell=True) is risky with dynamic input.",
+                        node.lineno,
+                    )
+
+        self.generic_visit(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.define_name(node.name)
+        function_scope = set(self.current_scope())
+        local_bindings = self._collect_function_bindings(node)
+        function_scope.update(local_bindings)
+        function_scope.update(self._collect_argument_names(node.args))
+        self.scope_stack.append(function_scope)
+        self.constant_stack.append({})
+
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if isinstance(default, (ast.List, ast.Dict, ast.Set)):
+                self.add_issue(
+                    self.logical_issues,
+                    "Mutable default argument",
+                    "A mutable default value is shared across calls.",
+                    getattr(default, "lineno", node.lineno),
+                )
+                self.add_fix(
+                    "Replace mutable defaults",
+                    "Use None and create the mutable object inside the function.",
+                    "def add_item(item, bucket=None):\n    if bucket is None:\n        bucket = []\n    bucket.append(item)\n    return bucket",
+                )
+
+        self.generic_visit(node)
+        self.constant_stack.pop()
+        self.scope_stack.pop()
+
+    def _call_name(self, node: ast.AST) -> str | None:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            base = self._call_name(node.value)
+            return f"{base}.{node.attr}" if base else node.attr
+        return None
+
+    def _collect_function_bindings(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+        bindings: set[str] = set()
+        for child in ast.walk(node):
+            if child is node:
+                continue
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bindings.add(child.name)
+                continue
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                bindings.add(child.id)
+        return bindings
+
+    def _collect_argument_names(self, args: ast.arguments) -> set[str]:
+        names = {arg.arg for arg in args.posonlyargs + args.args + args.kwonlyargs}
+        if args.vararg:
+            names.add(args.vararg.arg)
+        if args.kwarg:
+            names.add(args.kwarg.arg)
+        return names
+
+    def _register_target(self, node: ast.AST) -> None:
+        if isinstance(node, ast.Name):
+            self.define_name(node.id)
+            return
+        for child in ast.iter_child_nodes(node):
+            self._register_target(child)
+
+    def _track_constant_target(self, node: ast.AST, value: Any) -> None:
+        if isinstance(node, ast.Name):
+            if value is None:
+                self.current_constants().pop(node.id, None)
+            else:
+                self.current_constants()[node.id] = value
+            return
+        for child in ast.iter_child_nodes(node):
+            self._track_constant_target(child, None)
+
+    def _resolve_constant(self, node: ast.AST | None) -> Any:
+        if node is None:
+            return None
+        if isinstance(node, ast.Name):
+            for constants in reversed(self.constant_stack):
+                if node.id in constants:
+                    return constants[node.id]
+            return None
+        try:
+            return ast.literal_eval(node)
+        except Exception:
+            return None
+
+    def _detect_constant_assignment_issues(self, value: ast.AST, line: int, resolved: Any) -> None:
+        if isinstance(resolved, dict) and len(resolved) == 1:
+            if isinstance(value, ast.Dict) and len(value.keys) > 1:
+                keys = [self._resolve_constant(key) for key in value.keys]
+                unique_keys = {key for key in keys if key is not None}
+                if len(unique_keys) < len([key for key in keys if key is not None]):
+                    self.add_issue(
+                        self.logical_issues,
+                        "Duplicate dictionary key",
+                        "A later constant key overwrites an earlier entry in this dictionary literal.",
+                        line,
+                    )
+
+
+def analyze_python_code(tree: ast.AST) -> dict[str, list[dict[str, str]]]:
+    visitor = PythonReviewVisitor(collect_module_bindings(tree))
+    visitor.visit(tree)
+    return {
+        "syntax_errors": visitor.syntax_errors,
+        "type_errors": visitor.type_errors,
+        "logical_issues": visitor.logical_issues,
+        "security_issues": visitor.security_issues,
+        "suggested_fixes": visitor.suggested_fixes,
+    }
+
+
+def collect_module_bindings(tree: ast.AST) -> set[str]:
+    bindings: set[str] = set()
+    for node in getattr(tree, "body", []):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bindings.add(node.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    bindings.add(alias.asname or alias.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
+            for child in ast.walk(node):
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                    bindings.add(child.id)
+    return bindings
 
 
 async def query_ollama(language: str, code: str) -> ReviewResponse:

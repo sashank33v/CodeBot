@@ -3,104 +3,148 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Code Review</title>
+    <title>Code Review Console</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-    <main class="page-shell">
-        <section class="hero-card">
+    <div class="backdrop"></div>
+    <main class="app-shell">
+        <section class="hero-panel">
             <div class="hero-copy">
-                <p class="eyebrow">Code Review</p>
-                <h1>Catch real issues before they become rework.</h1>
+                <p class="eyebrow">Code Review Console</p>
+                <h1>Sharper analysis. Better signal.</h1>
                 <p class="hero-text">
-                    Review Python, JavaScript, and C++ with a FastAPI app that uses Ollama when available and falls back to a local analyzer when it is not.
+                    Review Python, JavaScript, and C++ with a live engine switch, stronger fallback analysis, and a result board designed to surface the issues that matter first.
                 </p>
             </div>
-            <div class="hero-metrics">
-                <div class="metric-card">
-                    <span class="metric-label">Review Scope</span>
-                    <strong>Syntax, logic, security</strong>
+
+            <div class="hero-stats">
+                <div class="stat-tile">
+                    <span class="stat-label">Coverage</span>
+                    <strong>Syntax, type, logic, security</strong>
                 </div>
-                <div class="metric-card">
-                    <span class="metric-label">Fallback Mode</span>
-                    <strong>Works without Ollama</strong>
+                <div class="stat-tile">
+                    <span class="stat-label">Fallback Engine</span>
+                    <strong>Static analyzer with rule-based checks</strong>
+                </div>
+                <div class="stat-tile accent-tile">
+                    <span class="stat-label">Output</span>
+                    <strong>Ranked findings and actionable fixes</strong>
                 </div>
             </div>
         </section>
 
-        <section class="workspace">
-            <div class="panel input-panel">
-                <div class="section-heading">
-                    <h2>Submit Code</h2>
-                    <p>Pick a language, paste the snippet, and run the review.</p>
+        <section class="workspace-grid">
+            <section class="console-panel input-panel">
+                <div class="panel-heading">
+                    <div>
+                        <p class="section-kicker">Input</p>
+                        <h2>Review Session</h2>
+                    </div>
+                    <div id="status-pill" class="status-pill neutral">Ready</div>
                 </div>
 
                 <form id="review-form" class="review-form">
-                    <div class="control-grid">
-                        <div class="field-row">
-                            <label for="language">Language</label>
+                    <div class="toolbar">
+                        <label class="field-row">
+                            <span>Language</span>
                             <select id="language" name="language">
                                 <option value="Python">Python</option>
                                 <option value="JavaScript">JavaScript</option>
                                 <option value="C++">C++</option>
                             </select>
+                        </label>
+
+                        <div class="mini-stat">
+                            <span class="mini-label">Lines</span>
+                            <strong id="line-count">0</strong>
                         </div>
 
-                        <div class="field-row">
-                            <label for="status-pill">Engine</label>
-                            <div id="status-pill" class="status-pill">Ready to review</div>
+                        <div class="mini-stat">
+                            <span class="mini-label">Characters</span>
+                            <strong id="char-count">0</strong>
                         </div>
                     </div>
 
-                    <div class="field-row">
-                        <label for="code">Code</label>
-                        <textarea id="code" name="code" spellcheck="false" placeholder="Paste your code here..."></textarea>
-                    </div>
+                    <label class="field-row">
+                        <span>Snippet</span>
+                        <textarea id="code" name="code" spellcheck="false" placeholder="Paste code to review..."></textarea>
+                    </label>
 
-                    <div class="actions">
+                    <div class="action-row">
                         <button id="submit-button" type="submit">Run Review</button>
+                        <p id="form-message" class="form-message" aria-live="polite"></p>
                     </div>
-                    <p id="form-message" class="form-message" aria-live="polite"></p>
                 </form>
-            </div>
+            </section>
 
             <section id="results" class="results-panel hidden" aria-live="polite">
-                <div class="panel summary-panel">
-                    <div class="section-heading">
-                        <h2>Summary</h2>
-                        <p id="summary-badge" class="summary-badge">Waiting for a review</p>
+                <section class="console-panel summary-panel">
+                    <div class="panel-heading">
+                        <div>
+                            <p class="section-kicker">Overview</p>
+                            <h2>Review Summary</h2>
+                        </div>
+                        <div id="summary-badge" class="summary-badge">Waiting</div>
                     </div>
+
                     <p id="summary-text" class="summary-text"></p>
-                </div>
 
-                <div class="results-grid">
-                    <article class="panel result-section result-critical">
-                        <div class="section-heading">
-                            <h3>Errors</h3>
-                            <p>Syntax, type, and security signals.</p>
+                    <div class="score-grid">
+                        <article class="score-card critical">
+                            <span class="score-label">Critical</span>
+                            <strong id="critical-count">0</strong>
+                            <p>Syntax, type, and security findings.</p>
+                        </article>
+
+                        <article class="score-card warning">
+                            <span class="score-label">Logic</span>
+                            <strong id="logic-count">0</strong>
+                            <p>Correctness and maintainability signals.</p>
+                        </article>
+
+                        <article class="score-card neutral-card">
+                            <span class="score-label">Fixes</span>
+                            <strong id="fix-count">0</strong>
+                            <p>Suggested rewrites and next actions.</p>
+                        </article>
+                    </div>
+                </section>
+
+                <section class="results-columns">
+                    <article class="console-panel result-column">
+                        <div class="panel-heading compact">
+                            <div>
+                                <p class="section-kicker">Priority</p>
+                                <h3>Critical Findings</h3>
+                            </div>
                         </div>
-                        <div id="errors-content"></div>
+                        <div id="errors-content" class="stack-list"></div>
                     </article>
 
-                    <article class="panel result-section result-logical">
-                        <div class="section-heading">
-                            <h3>Logic</h3>
-                            <p>Behavior, correctness, and maintainability issues.</p>
+                    <article class="console-panel result-column">
+                        <div class="panel-heading compact">
+                            <div>
+                                <p class="section-kicker">Behavior</p>
+                                <h3>Logic Review</h3>
+                            </div>
                         </div>
-                        <div id="improvements-content"></div>
+                        <div id="improvements-content" class="stack-list"></div>
                     </article>
 
-                    <article class="panel result-section result-fixes">
-                        <div class="section-heading">
-                            <h3>Suggested Fixes</h3>
-                            <p>Actionable next steps and example rewrites.</p>
+                    <article class="console-panel result-column">
+                        <div class="panel-heading compact">
+                            <div>
+                                <p class="section-kicker">Repair</p>
+                                <h3>Suggested Fixes</h3>
+                            </div>
                         </div>
-                        <div id="fixes-content"></div>
+                        <div id="fixes-content" class="stack-list"></div>
                     </article>
-                </div>
+                </section>
             </section>
         </section>
     </main>
@@ -116,6 +160,12 @@
         const errorsContent = document.getElementById("errors-content");
         const improvementsContent = document.getElementById("improvements-content");
         const fixesContent = document.getElementById("fixes-content");
+        const codeField = document.getElementById("code");
+        const lineCount = document.getElementById("line-count");
+        const charCount = document.getElementById("char-count");
+        const criticalCount = document.getElementById("critical-count");
+        const logicCount = document.getElementById("logic-count");
+        const fixCount = document.getElementById("fix-count");
 
         function escapeHtml(text) {
             return String(text)
@@ -126,24 +176,26 @@
                 .replaceAll("'", "&#039;");
         }
 
-        function renderIssues(title, items, isFixes = false) {
+        function renderIssues(items, variant, isFixes = false) {
             if (!items.length) {
-                return `<div class="empty-state">No ${title.toLowerCase()} found.</div>`;
+                return `<div class="empty-state">No findings in this section.</div>`;
             }
 
             return items.map((item) => {
-                const extra = isFixes
+                const meta = isFixes
                     ? item.example
                         ? `<pre>${escapeHtml(item.example)}</pre>`
                         : ""
-                    : `<p class="meta">Line ${escapeHtml(item.line || "N/A")}</p>`;
+                    : `<div class="issue-meta">Line ${escapeHtml(item.line || "N/A")}</div>`;
 
                 return `
-                    <div class="issue-card ${isFixes ? "fix-card" : "alert-card"}">
-                        <h4>${escapeHtml(item.title)}</h4>
+                    <article class="issue-card ${variant}">
+                        <div class="issue-topline">
+                            <h4>${escapeHtml(item.title)}</h4>
+                        </div>
                         <p>${escapeHtml(item.details)}</p>
-                        ${extra}
-                    </div>
+                        ${meta}
+                    </article>
                 `;
             }).join("");
         }
@@ -153,23 +205,32 @@
             statusPill.className = `status-pill ${mode}`;
         }
 
+        function updateInputStats() {
+            const value = codeField.value;
+            charCount.textContent = String(value.length);
+            lineCount.textContent = value ? String(value.split("\n").length) : "0";
+        }
+
+        codeField.addEventListener("input", updateInputStats);
+        updateInputStats();
+
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
 
             const language = document.getElementById("language").value;
-            const code = document.getElementById("code").value;
+            const code = codeField.value;
 
             if (!code.trim()) {
-                formMessage.textContent = "Please paste some code before running a review.";
+                formMessage.textContent = "Paste code before starting the review.";
                 formMessage.className = "form-message error-text";
-                setStatus("Missing code", "error");
+                setStatus("Missing input", "error");
                 results.classList.add("hidden");
                 return;
             }
 
-            formMessage.textContent = "Review in progress...";
+            formMessage.textContent = "Analyzing snippet...";
             formMessage.className = "form-message";
-            setStatus("Running review", "working");
+            setStatus("Running", "working");
             submitButton.disabled = true;
 
             try {
@@ -189,27 +250,34 @@
                     ...(data.type_errors || []),
                     ...(data.security_issues || [])
                 ];
+                const logicIssues = data.logical_issues || [];
+                const fixes = data.suggested_fixes || [];
+                const totalIssues = combinedErrors.length + logicIssues.length;
 
                 summaryText.textContent = data.summary;
-                summaryBadge.textContent = combinedErrors.length
-                    ? `${combinedErrors.length} issue${combinedErrors.length === 1 ? "" : "s"} flagged`
-                    : "No critical issues flagged";
+                summaryBadge.textContent = totalIssues
+                    ? `${totalIssues} finding${totalIssues === 1 ? "" : "s"}`
+                    : "No findings";
 
-                errorsContent.innerHTML = renderIssues("Errors", combinedErrors);
-                improvementsContent.innerHTML = renderIssues("Logic issues", data.logical_issues || []);
-                fixesContent.innerHTML = renderIssues("Suggested fixes", data.suggested_fixes || [], true);
+                criticalCount.textContent = String(combinedErrors.length);
+                logicCount.textContent = String(logicIssues.length);
+                fixCount.textContent = String(fixes.length);
+
+                errorsContent.innerHTML = renderIssues(combinedErrors, "critical-card");
+                improvementsContent.innerHTML = renderIssues(logicIssues, "warning-card");
+                fixesContent.innerHTML = renderIssues(fixes, "fix-card", true);
                 results.classList.remove("hidden");
                 formMessage.textContent = "Review completed.";
 
                 if ((data.summary || "").toLowerCase().includes("fallback")) {
-                    setStatus("Local fallback analyzer", "fallback");
+                    setStatus("Fallback analyzer", "fallback");
                 } else {
-                    setStatus("Ollama review completed", "success");
+                    setStatus("Ollama response", "success");
                 }
             } catch (error) {
                 formMessage.textContent = error.message;
                 formMessage.className = "form-message error-text";
-                setStatus("Review failed", "error");
+                setStatus("Failed", "error");
                 results.classList.add("hidden");
             } finally {
                 submitButton.disabled = false;
