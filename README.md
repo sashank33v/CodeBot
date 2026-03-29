@@ -1,13 +1,13 @@
-# CodeBot
+# Code Review
 
-A FastAPI web app for code review using Ollama and the `tinyllama` model.
+A FastAPI web app for code review using Ollama when available, with a built-in local fallback analyzer.
 
 ## Features
 
 - Paste code and choose Python, JavaScript, or C++
 - Review for syntax errors, type errors, logical issues, and security issues
-- Receive suggested fixes in a clean browser UI
-- Handles empty input and Ollama connection failures
+- Receive suggested fixes in a cleaner browser UI
+- Falls back to a local analyzer when Ollama is unavailable or returns unusable output
 
 ## Run
 
