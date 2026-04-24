@@ -4,7 +4,7 @@ A FastAPI web app for code review using Ollama when available, with a built-in l
 
 ## Features
 
-- Paste code and choose Python, JavaScript, or C++
+- Paste code and choose Python.
 - Review for syntax errors, type errors, logical issues, and security issues
 - Receive suggested fixes in a cleaner browser UI
 - Falls back to a local analyzer when Ollama is unavailable or returns unusable output
